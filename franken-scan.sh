@@ -8,9 +8,15 @@
 #  "am I OK?" and "what do I fix?". So that's all this does.
 #
 #  Ground rules I'm sticking to (read the code and hold me to them):
-#    - it only LOOKS. It never changes a thing on your system.
-#    - it never touches the network or phones home. No telemetry, nothing.
+#    - it only LOOKS. It never changes your configuration: no installs,
+#      no edits, no service restarts. (Honest small print: tools it asks,
+#      like dnf or zypper, may write to their own log files, and reading
+#      files can bump their "last accessed" time. That's the OS, not us.)
+#    - it never contacts the internet or phones home. No telemetry, nothing.
 #    - it's one bash file with nothing to install.
+#
+#  The only file it ever creates is the report, and only if you ask for one
+#  with --report. Even then it refuses to overwrite anything that's already there.
 #
 #  Run it:
 #    bash franken-scan.sh          # quick look as your normal user
@@ -28,7 +34,7 @@ set -u
 # works the same no matter what language your system is set to.
 export LC_ALL=C
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +43,7 @@ VERSION="1.0.0"
 
 USE_COLOR=1
 QUIET=0
+SHOW_MONSTER=0
 REPORT_FILE=""
 
 # Everyone starts on 100 and loses points per problem. HIGH hurts the most
@@ -56,11 +63,13 @@ Usage: bash franken-scan.sh [options]
   --quiet           only show problems
   --no-color        no colours
   --version         print the version
+  --monster         say hello to the monster (that's all it does)
   -h, --help        this help
 
 Tip: run with sudo for the full scan. Without it, a few checks get skipped
-(you'll see which ones). franken-scan never changes your system and never
-uses the network.
+(you'll see which ones). franken-scan never changes your configuration and
+never contacts the internet. With --report it creates one new file, and it
+won't overwrite an existing one.
 EOF
 }
 
@@ -77,6 +86,7 @@ while [ $# -gt 0 ]; do
     --quiet)    QUIET=1 ;;
     --no-color) USE_COLOR=0 ;;
     --version)  echo "franken-scan $VERSION"; exit 0 ;;
+    --monster)  SHOW_MONSTER=1 ;;
     -h|--help)  show_help; exit 0 ;;
     *) echo "Unknown option: $1 (try --help)" >&2; exit 2 ;;
   esac
@@ -99,6 +109,26 @@ else
   C_RESET=""; C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_GREY=""
 fi
 
+# How wide to wrap text. Use the terminal's width, but cap it at 100 because
+# really long lines are hard to read, and fall back to 80 if we can't tell.
+TERM_WIDTH=$( { [ -t 1 ] && tput cols 2>/dev/null; } || echo 80)
+[ "$TERM_WIDTH" -gt 100 ] 2>/dev/null && TERM_WIDTH=100
+[ "$TERM_WIDTH" -lt 40 ] 2>/dev/null && TERM_WIDTH=40
+
+# wrap INDENT "first-line prefix" "text"
+# Word-wraps text to the terminal width. The first line starts with the
+# prefix (e.g. "      Why: "); every line after that is indented by INDENT
+# spaces so it sits neatly under the first. The prefix's VISIBLE width should
+# equal INDENT (colour codes don't count).
+wrap() {
+  local indent="$1" prefix="$2" text="$3" pad
+  pad=$(printf '%*s' "$indent" '')
+  printf '%s\n' "$text" | fold -s -w $((TERM_WIDTH - indent)) | {
+    IFS= read -r first && printf '%s%s\n' "$prefix" "$first"
+    while IFS= read -r line; do printf '%s%s\n' "$pad" "$line"; done
+  }
+}
+
 SCORE=100
 COUNT_PASS=0; COUNT_HIGH=0; COUNT_MED=0; COUNT_LOW=0; COUNT_SKIP=0
 
@@ -113,7 +143,7 @@ section() {
 
 pass() {
   COUNT_PASS=$((COUNT_PASS + 1))
-  [ "$QUIET" -eq 1 ] || printf '  %s✓%s %s\n' "$C_GREEN" "$C_RESET" "$1"
+  [ "$QUIET" -eq 1 ] || wrap 4 "  ${C_GREEN}✓${C_RESET} " "$1"
   REPORT_LINES+=("- ✅ $1")
 }
 
@@ -128,29 +158,38 @@ problem() {
     medium) SCORE=$((SCORE - PENALTY_MED));  COUNT_MED=$((COUNT_MED + 1));   colour="$C_YELLOW"; label="MEDIUM" ;;
     *)      SCORE=$((SCORE - PENALTY_LOW));  COUNT_LOW=$((COUNT_LOW + 1));   colour="$C_YELLOW"; label="LOW" ;;
   esac
-  printf '  %s✗ [%s]%s %s\n' "$colour" "$label" "$C_RESET" "$title"
-  printf '      %sWhy:%s %s\n' "$C_DIM" "$C_RESET" "$why"
-  [ -n "$fix" ] && printf '      %sFix:%s %s%s%s\n' "$C_DIM" "$C_RESET" "$C_BOLD" "$fix" "$C_RESET"
+  # Title, then "Why" and "Fix" lined up underneath, each wrapped to fit.
+  wrap 4 "  ${colour}✗${C_RESET} " "${colour}[${label}]${C_RESET} $title"
+  wrap 9 "    ${C_DIM}Why:${C_RESET} " "$why"
+  [ -n "$fix" ] && wrap 9 "    ${C_DIM}Fix:${C_RESET} " "$C_BOLD$fix$C_RESET"
   REPORT_LINES+=("- ❌ **[$label] $title**" "  - Why: $why")
   [ -n "$fix" ] && REPORT_LINES+=("  - Fix: \`$fix\`")
 }
 
 # Worth knowing, but not something you get marked down for.
 info() {
-  [ "$QUIET" -eq 1 ] || printf '  %si%s %s\n' "$C_BLUE" "$C_RESET" "$1"
+  [ "$QUIET" -eq 1 ] || wrap 4 "  ${C_BLUE}i${C_RESET} " "$1"
   REPORT_LINES+=("- ℹ️ $1")
 }
 
 # Couldn't check it. I'd rather say so honestly than quietly pretend it passed.
 skip() {
   COUNT_SKIP=$((COUNT_SKIP + 1))
-  [ "$QUIET" -eq 1 ] || printf '  %s- skipped: %s%s\n' "$C_GREY" "$1" "$C_RESET"
+  [ "$QUIET" -eq 1 ] || wrap 4 "  ${C_GREY}-${C_RESET} " "${C_GREY}skipped: $1${C_RESET}"
   REPORT_LINES+=("- ⏭️ Skipped: $1")
 }
 
 have()       { command -v "$1" >/dev/null 2>&1; }
 is_root()    { [ "$(id -u)" -eq 0 ]; }
 svc_active() { have systemctl && systemctl is-active --quiet "$1" 2>/dev/null; }
+
+# Members of a group, read straight from /etc/group. (Deliberately NOT
+# "getent": on machines joined to LDAP/AD that would ask a server over the
+# network, and we promised not to do that.)
+group_members() { awk -F: -v g="$1" '$1 == g {print $4}' /etc/group 2>/dev/null; }
+
+# The SSH service is called "ssh" on Debian/Ubuntu and "sshd" everywhere else.
+ssh_service() { [ "$FAMILY" = "debian" ] && echo ssh || echo sshd; }
 
 # Is something listening on this port on a NON-local address?
 # (Loopback, VPN-only and Docker-bridge addresses don't count as "public".)
@@ -172,12 +211,11 @@ listening_publicly() {
 detect_system() {
   DISTRO_NAME="Unknown Linux"; FAMILY="other"
   if [ -r /etc/os-release ]; then
-    # Sourced inside $( ) so nothing in that file can leak into our script.
-    # shellcheck disable=SC1091
-    DISTRO_NAME=$(. /etc/os-release && echo "${PRETTY_NAME:-$NAME}")
-    local ids
-    # shellcheck disable=SC1091
-    ids=$(. /etc/os-release && echo "${ID:-} ${ID_LIKE:-}")
+    # Read os-release as plain text rather than "source"-ing it. Sourcing would
+    # RUN it as shell code, as root, which is a bad idea for a security tool.
+    osr() { sed -n "s/^$1=//p" /etc/os-release | head -n1 | tr -d '"'"'"; }
+    DISTRO_NAME=$(osr PRETTY_NAME); [ -n "$DISTRO_NAME" ] || DISTRO_NAME=$(osr NAME)
+    local ids; ids="$(osr ID) $(osr ID_LIKE)"
     case " $ids " in
       *" debian "*|*" ubuntu "*)            FAMILY="debian" ;;
       *" arch "*)                           FAMILY="arch" ;;
@@ -204,88 +242,149 @@ check_ssh() {
   fi
   local sshd_bin; sshd_bin=$(command -v sshd || echo /usr/sbin/sshd)
 
-  # "sshd -T" gives the REAL settings after all the includes and defaults are
-  # applied, but it needs root. Without root we read the config files
-  # ourselves, which is close enough for a quick look.
-  # Everything gets lower-cased: older OpenSSH prints "passwordauthentication",
-  # newer ones print "PasswordAuthentication". (That one caught me out. The
+  # "sshd -T" prints the REAL settings after every Include, Match default and
+  # built-in default has been applied. It needs root, and that's the only
+  # source I trust. I used to guess from the config files without root, but
+  # Include ordering made the guess wrong in both directions, so now it's
+  # simply "run with sudo" rather than a confident wrong answer.
+  #
+  # Lower-cased because older OpenSSH prints "passwordauthentication" and
+  # newer ones print "PasswordAuthentication". (That one caught me out: the
   # script happily told me my keys-only box accepted passwords.)
-  local cfg=""
-  if is_root; then
-    cfg=$("$sshd_bin" -T 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  if ! is_root; then
+    skip "SSH settings (need sudo to read the real, effective SSH settings)"
+    return
   fi
-  if [ -z "$cfg" ]; then
-    if [ -r /etc/ssh/sshd_config ]; then
-      cfg=$(cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null \
-            | sed 's/#.*//' | tr '[:upper:]' '[:lower:]' | awk 'NF>=2 {print $1, $2}')
-      info "Read SSH settings from the config file (run with sudo for exact results)."
-    else
-      skip "SSH settings (can't read /etc/ssh/sshd_config, try sudo)"
-      return
-    fi
+  local cfg
+  if ! cfg=$("$sshd_bin" -T 2>/dev/null) || [ -z "$cfg" ]; then
+    skip "SSH settings ('sshd -T' failed. Is the SSH config valid? Try: sudo sshd -t)"
+    return
   fi
-
-  # sshd uses the FIRST value it finds for a setting, so we do too.
+  cfg=$(printf '%s\n' "$cfg" | tr '[:upper:]' '[:lower:]')
   ssh_opt() { printf '%s\n' "$cfg" | awk -v k="$1" '$1==k {print $2; exit}'; }
 
-  # No setting at all means the modern default: root can log in with a key only.
-  local root_login; root_login=$(ssh_opt permitrootlogin)
-  case "${root_login:-prohibit-password}" in
-    no) pass "Root can't log in over SSH" ;;
-    prohibit-password|without-password)
-        problem low "Root can log in over SSH with a key" \
-          "Logging in as a normal user and using sudo leaves a clearer trail and limits the damage if a key leaks." \
-          "Set 'PermitRootLogin no' in /etc/ssh/sshd_config, then: sudo systemctl reload sshd" ;;
-    *)  problem high "Root can log in over SSH with a password" \
-          "Bots try root passwords against every server on the internet, all day, every day." \
-          "Set 'PermitRootLogin no' in /etc/ssh/sshd_config, then: sudo systemctl reload sshd" ;;
-  esac
+  # Where to put a fix. Most distros read /etc/ssh/sshd_config.d/ FIRST, and
+  # sshd keeps the first value it sees, so a drop-in file wins over the main
+  # file. "sshd -t" checks the config before reloading, so a typo can't
+  # take SSH down.
+  local where="add it to a new file /etc/ssh/sshd_config.d/00-hardening.conf"
+  local apply; apply="sudo sshd -t && sudo systemctl reload $(ssh_service)"
 
-  local pw; pw=$(ssh_opt passwordauthentication)
-  if [ "${pw:-yes}" = "no" ]; then
-    pass "SSH only accepts keys, not passwords"
-  else
-    # The bit in brackets has saved more than one person from locking themselves out.
+  # Can a PASSWORD get someone in? Two routes: PasswordAuthentication, and
+  # keyboard-interactive via PAM (which usually asks for... a password).
+  # Turning off only the first leaves the second wide open.
+  local pw kbd pam pw_possible=no
+  pw=$(ssh_opt passwordauthentication)
+  kbd=$(ssh_opt kbdinteractiveauthentication); [ -n "$kbd" ] || kbd=$(ssh_opt challengeresponseauthentication)
+  pam=$(ssh_opt usepam)
+  if [ "${pw:-yes}" = "yes" ]; then
+    pw_possible=yes
     problem high "SSH accepts passwords" \
-      "Passwords can be guessed by bots. SSH keys can't. (Make sure your key login works BEFORE turning passwords off!)" \
-      "Set 'PasswordAuthentication no' in /etc/ssh/sshd_config, then: sudo systemctl reload sshd"
+      "Passwords can be guessed by bots. SSH keys can't. (Make sure your key login works BEFORE turning passwords off, and keep your current session open while you test!)" \
+      "Set 'PasswordAuthentication no': $where, then: $apply"
+  elif [ "${kbd:-yes}" = "yes" ] && [ "${pam:-no}" = "yes" ]; then
+    pw_possible=yes
+    problem high "SSH can still ask for a password (keyboard-interactive via PAM)" \
+      "PasswordAuthentication is off, but this second login route usually asks for a password anyway, so bots can still guess." \
+      "Set 'KbdInteractiveAuthentication no': $where, then: $apply"
+  else
+    pass "SSH doesn't accept passwords (keys only, unless AuthenticationMethods says otherwise)"
   fi
 
-  # Moving SSH off port 22 cuts down log spam but isn't real security,
-  # so it's just mentioned, not scored.
-  SSH_PORT=$(ssh_opt port); SSH_PORT=${SSH_PORT:-22}
-  info "SSH listens on port $SSH_PORT."
+  # Root login. How bad it is depends on whether passwords work at all.
+  local root_login; root_login=$(ssh_opt permitrootlogin)
+  case "${root_login:-prohibit-password}" in
+    no)
+      pass "Root can't log in over SSH" ;;
+    forced-commands-only)
+      pass "Root can only run pre-set commands over SSH (forced-commands-only)" ;;
+    prohibit-password|without-password)
+      problem low "Root can log in over SSH with a key" \
+        "Logging in as a normal user and using sudo leaves a clearer trail and limits the damage if a key leaks." \
+        "Set 'PermitRootLogin no': $where, then: $apply" ;;
+    *)
+      if [ "$pw_possible" = "yes" ]; then
+        problem high "Root can log in over SSH with a password" \
+          "Bots try root passwords against every server on the internet, all day, every day." \
+          "Set 'PermitRootLogin no': $where, then: $apply"
+      else
+        problem low "Root can log in over SSH (keys only, as passwords are off)" \
+          "Logging in as a normal user and using sudo leaves a clearer trail and limits the damage if a key leaks." \
+          "Set 'PermitRootLogin no': $where, then: $apply"
+      fi ;;
+  esac
+
+  # Every port sshd is set to use. Moving off 22 cuts log spam but isn't real
+  # security, so it's only mentioned. The ports are reused by the firewall
+  # advice and the brute-force check.
+  SSH_PORTS=$(printf '%s\n' "$cfg" | awk '$1=="port" {print $2}' | sort -un | paste -sd ' ' -)
+  SSH_PORTS=${SSH_PORTS:-22}
+  info "SSH is set to use port(s): $SSH_PORTS."
 }
 
 check_firewall() {
   section "Firewall"
-  local found=""
 
-  # Try the usual suspects, most specific first. Reading the actual rules
-  # needs root; without it we settle for "is a firewall service running?".
-  if have ufw && is_root && ufw status 2>/dev/null | grep -q "Status: active"; then
-    found="ufw"
-  elif svc_active firewalld; then
-    found="firewalld"
-  elif is_root && have nft && nft list ruleset 2>/dev/null | grep -qE "hook input.*policy (drop|reject)|^[[:space:]]*(tcp|udp|ct|iif|ip) "; then
-    found="nftables"
-  elif is_root && have iptables && iptables -S INPUT 2>/dev/null | grep -qE "^-P INPUT (DROP|REJECT)|^-A INPUT"; then
-    found="iptables"
-  elif svc_active ufw; then
-    found="ufw (service running)"
-  elif svc_active nftables; then
-    found="nftables (service running)"
+  # A firewall SERVICE running isn't the same as a firewall actually
+  # blocking anything. (A ufw with "allow incoming", or an nftables
+  # "accept everything", looks active but protects nothing.) So I only give
+  # a pass when the rules show incoming traffic is actually dropped by
+  # default, and that needs root to see.
+  if ! is_root; then
+    local svc
+    for svc in ufw firewalld nftables; do
+      if svc_active "$svc"; then
+        skip "Firewall rules ($svc is running, but sudo is needed to check it actually blocks anything)"
+        return
+      fi
+    done
+    skip "Firewall (need sudo to read the rules; no firewall service seen running)"
+    return
   fi
 
-  if [ -n "$found" ]; then
-    pass "A firewall is active: $found"
-  elif ! is_root; then
-    skip "Firewall rules (need sudo to read them; no firewall service seen running)"
-  else
-    problem high "No active firewall found" \
-      "Without a firewall, every service you run is reachable from the internet, including the ones you forgot about." \
-      "Debian/Ubuntu: sudo ufw allow OpenSSH && sudo ufw enable   ·   Fedora/RHEL: sudo systemctl enable --now firewalld"
+  local verdict="" detail=""
+
+  if have ufw && ufw status 2>/dev/null | grep -q "Status: active"; then
+    if ufw status verbose 2>/dev/null | grep -qE "Default: (deny|reject) \(incoming\)"; then
+      verdict=pass; detail="ufw is on and blocks incoming connections by default"
+    else
+      verdict=weak; detail="ufw is on, but it ALLOWS incoming connections by default"
+    fi
+  elif svc_active firewalld && have firewall-cmd; then
+    local zone; zone=$(firewall-cmd --get-default-zone 2>/dev/null)
+    if [ "$zone" = "trusted" ]; then
+      verdict=weak; detail="firewalld is on, but the default zone is 'trusted' (lets everything in)"
+    elif [ -n "$zone" ]; then
+      verdict=pass; detail="firewalld is on (default zone: $zone)"
+    fi
+  elif have nft && nft list ruleset 2>/dev/null | grep -qE "hook input .*policy (drop|reject)"; then
+    verdict=pass; detail="nftables drops incoming traffic by default"
+  elif have iptables && iptables -S INPUT 2>/dev/null | grep -qE "^-P INPUT (DROP|REJECT)|^-A INPUT -j (DROP|REJECT)$"; then
+    verdict=pass; detail="iptables drops incoming traffic by default (IPv4)"
+  elif have nft && nft list ruleset 2>/dev/null | grep -q "hook input"; then
+    verdict=unknown; detail="nftables has input rules, but the default is 'accept', so I can't tell what's actually blocked"
   fi
+
+  # The fix: Fedora/RHEL get firewalld, everyone else gets ufw (the easiest
+  # to learn). The SSH port(s) are allowed FIRST, which is the bit that
+  # stops people locking themselves out of a remote server.
+  local fw_fix allow="" port
+  for port in ${SSH_PORTS:-22}; do allow="$allow sudo ufw allow $port/tcp &&"; done
+  case "$FAMILY" in
+    fedora) fw_fix="sudo dnf install firewalld && sudo systemctl enable --now firewalld   (SSH on port 22 is allowed by default; for another port first run: sudo firewall-cmd --permanent --add-port=PORT/tcp)" ;;
+    *)      fw_fix="$(install_cmd ufw) &&$allow sudo ufw default deny incoming && sudo ufw enable" ;;
+  esac
+
+  case "$verdict" in
+    pass)    pass "$detail" ;;
+    weak)    problem high "$detail" \
+               "A firewall that lets everything in is the same as no firewall at all." \
+               "$fw_fix" ;;
+    unknown) skip "Firewall: $detail" ;;
+    *)       problem high "No active firewall found" \
+               "Without a firewall, every service you run is reachable from the internet, including the ones you forgot about." \
+               "$fw_fix" ;;
+  esac
 }
 
 check_ports() {
@@ -341,7 +440,10 @@ check_ports() {
 # no network. So "no updates" really means "none as of your last refresh".
 check_updates() {
   section "Updates"
-  local pending=""
+  # pending stays EMPTY if we couldn't find out, which is reported as
+  # skipped, never as "no updates". (An empty answer from a failed command
+  # looks exactly like "all good", and that's how scanners lie to you.)
+  local pending="" out rc
 
   case "$FAMILY" in
     debian)
@@ -360,13 +462,24 @@ check_updates() {
       have pacman && pending=$(pacman -Qu 2>/dev/null | wc -l) ;;
     fedora)
       # -C = cache only, so dnf won't go off and download metadata.
-      have dnf && pending=$(dnf -C -q check-update 2>/dev/null | grep -cE '^[[:alnum:]].*\.(x86_64|aarch64|noarch|i686|armv7hl)') ;;
+      # dnf's exit code: 0 = nothing to update, 100 = updates available,
+      # anything else = it couldn't tell (e.g. no cache yet).
+      if have dnf; then
+        out=$(dnf -C -q check-update 2>/dev/null); rc=$?
+        case "$rc" in
+          0)   pending=0 ;;
+          100) pending=$(printf '%s\n' "$out" | awk 'NF==3 && $1 ~ /\./ {n++} END {print n+0}') ;;
+        esac
+      fi ;;
     suse)
-      have zypper && pending=$(zypper --no-refresh -q list-updates 2>/dev/null | grep -c '^v ') ;;
+      # --no-refresh = use what's already downloaded. Rows that are updates start with "v |".
+      if have zypper; then
+        out=$(zypper --no-refresh -q list-updates 2>/dev/null) && pending=$(printf '%s\n' "$out" | grep -c '^v ')
+      fi ;;
   esac
 
   if [ -z "$pending" ]; then
-    skip "Pending updates (don't know this package manager)"
+    skip "Pending updates (couldn't read the package cache. Run your package manager's refresh first, e.g. $(update_cmd))"
   elif [ "$pending" -gt 0 ]; then
     problem medium "$pending update(s) waiting to be installed" \
       "Old software is the easy way in. Most attacks use holes that were patched months ago." \
@@ -378,7 +491,8 @@ check_updates() {
   # Servers get forgotten. Automatic security updates are the safety net.
   case "$FAMILY" in
     debian)
-      if grep -qs 'Unattended-Upgrade "1"' /etc/apt/apt.conf.d/20auto-upgrades; then
+      # Only count a real setting, not one that's commented out.
+      if grep -qsE '^[[:space:]]*APT::Periodic::Unattended-Upgrade[[:space:]]+"1"' /etc/apt/apt.conf.d/*; then
         pass "Automatic security updates are on"
       else
         problem medium "Automatic security updates are off" \
@@ -409,6 +523,18 @@ check_updates() {
   fi
 }
 
+# The right way to install a package on THIS system, so we only ever show
+# one fix command instead of a "Debian: … · Fedora: … · Arch: …" wall.
+install_cmd() {
+  case "$FAMILY" in
+    debian) echo "sudo apt install $1" ;;
+    arch)   echo "sudo pacman -S $1" ;;
+    fedora) echo "sudo dnf install $1" ;;
+    suse)   echo "sudo zypper install $1" ;;
+    *)      echo "install '$1' with your package manager" ;;
+  esac
+}
+
 update_cmd() {
   case "$FAMILY" in
     debian) echo "sudo apt update && sudo apt upgrade" ;;
@@ -422,19 +548,30 @@ update_cmd() {
 # Only really matters if SSH is open to the world. If it's not, no need to nag.
 check_bruteforce() {
   section "Brute-force protection"
-  local tool="" t
-  for t in fail2ban crowdsec sshguard; do
-    if svc_active "$t"; then tool="$t"; break; fi
-  done
 
-  if [ -n "$tool" ]; then
-    pass "$tool is running (it bans IPs after repeated failed logins)"
-  elif listening_publicly "${SSH_PORT:-22}"; then
-    problem medium "Nothing is blocking repeated login attempts" \
+  # Only really matters if SSH is reachable from outside. If not, no nagging.
+  local public=no port
+  for port in ${SSH_PORTS:-22}; do listening_publicly "$port" && public=yes; done
+
+  # fail2ban running doesn't mean it's watching SSH. That needs an "sshd" jail.
+  if svc_active fail2ban; then
+    if ! is_root; then
+      skip "fail2ban is running (need sudo to check it's actually watching SSH)"
+    elif fail2ban-client status 2>/dev/null | grep -qi "ssh"; then
+      pass "fail2ban is watching SSH (it bans IPs after repeated failed logins)"
+    else
+      problem low "fail2ban is running but has no SSH jail" \
+        "It's installed and running, but it isn't watching SSH logins, so it isn't blocking anyone." \
+        "Create /etc/fail2ban/jail.local containing: [sshd] enabled = true   then: sudo systemctl restart fail2ban"
+    fi
+  elif svc_active crowdsec || svc_active sshguard; then
+    pass "Brute-force protection is running ($(svc_active crowdsec && echo crowdsec || echo sshguard))"
+  elif [ "$public" = "yes" ]; then
+    problem medium "No brute-force blocker running" \
       "Bots hammer SSH with guesses around the clock. fail2ban or CrowdSec bans them after a few failures." \
-      "Debian/Ubuntu: sudo apt install fail2ban   ·   Fedora: sudo dnf install fail2ban && sudo systemctl enable --now fail2ban   ·   Arch: sudo pacman -S fail2ban && sudo systemctl enable --now fail2ban"
+      "$(install_cmd fail2ban) && sudo systemctl enable --now fail2ban"
   else
-    info "No brute-force protection running, but SSH isn't open publicly, so that's fine."
+    info "No brute-force blocker running, but SSH isn't open publicly, so that's fine."
   fi
 }
 
@@ -444,7 +581,7 @@ check_accounts() {
   # Not a problem by itself. It's just a good moment to ask "should all of
   # these people still have the keys to the kingdom?"
   local admins
-  admins=$(for g in sudo wheel admin; do getent group "$g" 2>/dev/null | cut -d: -f4; done \
+  admins=$(for g in sudo wheel admin; do group_members "$g"; done \
            | tr ',' '\n' | grep -v '^$' | sort -u | paste -sd ' ' -)
   info "Users with admin (sudo) rights: ${admins:-none found}. Remove anyone who shouldn't be there."
 
@@ -483,11 +620,16 @@ check_docker() {
 
   # Anyone in the docker group can mount / into a container and do as they
   # please. Worth knowing who's in there.
-  local members; members=$(getent group docker 2>/dev/null | cut -d: -f4)
+  local members; members=$(group_members docker)
   [ -n "$members" ] && info "Users in the 'docker' group (effectively root access): $members"
 
-  if [ "$(stat -c '%a' /var/run/docker.sock 2>/dev/null)" = "666" ]; then
-    problem high "Docker socket is open to every user" \
+  # What matters is whether "others" (everyone) can WRITE to it: the 2-bit
+  # of the last permission digit. 666, 667, 777… all count.
+  local mode; mode=$(stat -c '%a' /var/run/docker.sock 2>/dev/null)
+  if [ -z "$mode" ]; then
+    skip "Docker socket permissions (couldn't read them)"
+  elif (( 8#$mode & 2 )); then
+    problem high "Docker socket is writable by every user (mode $mode)" \
       "Anyone on this machine can control Docker, and through it become root." \
       "sudo chmod 660 /var/run/docker.sock   (then find out what changed it)"
   else
@@ -501,8 +643,11 @@ check_files() {
   # Anything in these folders that ANY user can edit is a way to escalate to
   # root. -xdev keeps find on this one disk so it doesn't wander into network
   # mounts. Capped at 10 results so a really broken box doesn't flood the screen.
-  local ww
-  ww=$(find /etc /usr/bin /usr/sbin /usr/lib/systemd -xdev -type f -perm -0002 2>/dev/null | head -n 10 | paste -sd ' ' -)
+  # -H follows the starting folders if they're symlinks (on Arch /usr/sbin
+  # is just a link to /usr/bin, and plain find would skip it).
+  local ww dirs=() d
+  for d in /etc /usr/bin /usr/sbin /usr/lib/systemd; do [ -e "$d" ] && dirs+=("$d"); done
+  ww=$(find -H "${dirs[@]}" -xdev -type f -perm -0002 2>/dev/null | head -n 10 | paste -sd ' ' -)
   if [ -n "$ww" ]; then
     problem medium "System files that ANY user can edit" \
       "Someone with any account could change these to take over the system. Found: $ww" \
@@ -584,38 +729,87 @@ grade_for() {
   else echo F; fi
 }
 
-# The best bit. The worse your box, the more bloodshot the eye.
+# The easter egg (--monster). Just the head. He's had enough of his body.
 print_monster() {
-  local g=$1 eye mood col
+  printf '%s' "$C_GREEN"
+  cat <<'MONSTER'
+       .-----------------------.
+      / .---------------------. \
+     | |                       | |
+     | |   _   _   _   _   _   | |
+     | |  | |_| |_| |_| |_| |  | |
+     |_|__|_________________|__|_|
+     |                           |
+     |     =====       =====     |
+     |      (o)         (o)      |
+     |            / \            |
+     |           /___\           |
+ ____|                           |____
+|    |       _____________       |    |
+|    |=======|_|_|_|_|_|_|=======|    |
+|____|                           |____|
+     |   --+---+---+---+---+--   |
+      \                         /
+       \_______________________/
+MONSTER
+  printf '%s\n  %sIt'\''s alive!%s\n\n' "$C_RESET" "$C_BOLD" "$C_RESET"
+}
+
+# The big "franken-scan" lettering at the top (figlet's "Slant" font).
+# It's in a quoted heredoc so bash leaves every backslash and backtick
+# alone. 67 columns wide, so it still fits an 80-column SSH session.
+print_banner() {
+  printf '%s' "$C_GREEN"
+  cat <<'BANNER'
+    ____                 __
+   / __/________ _____  / /_____  ____        ______________ _____
+  / /_/ ___/ __ `/ __ \/ //_/ _ \/ __ \______/ ___/ ___/ __ `/ __ \
+ / __/ /  / /_/ / / / / ,< /  __/ / / /_____(__  ) /__/ /_/ / / / /
+/_/ /_/   \__,_/_/ /_/_/|_|\___/_/ /_/     /____/\___/\__,_/_/ /_/
+BANNER
+  printf '%s' "$C_RESET"
+  printf '  %sv%s · It'\''s alive!… but is it secure?%s\n' "$C_DIM" "$VERSION" "$C_RESET"
+  printf '  %s%s · %s · kernel %s · read-only, never contacts the internet%s\n' "$C_DIM" "$DISTRO_NAME" "$ARCH" "$KERNEL" "$C_RESET"
+  is_root || printf '  %sTip: run with sudo for the full scan (a few checks will be skipped).%s\n' "$C_YELLOW" "$C_RESET"
+}
+
+# The result at the end: grade, counts and a one-line verdict. Kept plain on
+# purpose: the banner up top is the only artwork.
+print_summary() {
+  local g=$1 mood col
   case "$g" in
-    A) eye="(  o  )"; mood="It's alive… and SECURE!";                        col="$C_GREEN" ;;
-    B) eye="( ~o  )"; mood="Not bad. A few stitches to tighten.";            col="$C_GREEN" ;;
-    C) eye="(~~o~ )"; mood="Hmm. This monster needs some work.";             col="$C_YELLOW" ;;
-    D) eye="(≈≈O≈≈)"; mood="Yikes. Bloodshot and worried.";                  col="$C_RED" ;;
-    *) eye="(#≈@≈#)"; mood="IT'S ALIVE… and wide open. Fix the HIGHs first!"; col="$C_RED" ;;
+    A) mood="It's alive… and SECURE!";                         col="$C_GREEN" ;;
+    B) mood="Not bad. A few stitches to tighten.";             col="$C_GREEN" ;;
+    C) mood="Hmm. This monster needs some work.";              col="$C_YELLOW" ;;
+    D) mood="Yikes. Plenty to fix.";                           col="$C_RED" ;;
+    *) mood="IT'S ALIVE… and wide open. Fix the HIGHs first!"; col="$C_RED" ;;
   esac
 
-  # The art is in a quoted heredoc so bash leaves every backslash alone.
-  # EYE is a placeholder that gets swapped for the face above.
-  local art
-  art=$(cat <<'ART'
-    \             /
-     \  _______  /
-      |/  ___  \|
-      | EYE |
-    =[|   >_    |]=
-      |  ~~~~~  |
-      \_|_|_|_|_/
-ART
-)
-  art=${art//EYE/$eye}
-  printf '\n%s%s%s\n' "$col" "$art" "$C_RESET"
-  printf '  %s%s%s\n' "$C_BOLD" "$mood" "$C_RESET"
+  # Skipped checks mean we didn't see everything, so don't hand out a
+  # confident "SECURE!" on a half-finished scan.
+  if [ "$COUNT_SKIP" -gt 0 ]; then
+    mood="Incomplete: $COUNT_SKIP check(s) skipped$(is_root || echo ', run with sudo for the full picture')."
+  fi
+
+  printf '\n%s── Result ──%s\n' "$C_BOLD$C_BLUE" "$C_RESET"
+  printf '  %sGrade %s%s · %d/100 · %s\n' "$C_BOLD$col" "$g" "$C_RESET" "$SCORE" "$mood"
+  printf '  %d passed · %s%d high%s · %s%d medium%s · %d low · %d skipped\n' \
+    "$COUNT_PASS" "$C_RED" "$COUNT_HIGH" "$C_RESET" "$C_YELLOW" "$COUNT_MED" "$C_RESET" "$COUNT_LOW" "$COUNT_SKIP"
 }
 
 write_report() {
   [ -n "$REPORT_FILE" ] || return
-  {
+
+  # Never overwrite anything, and never follow a symlink. If you're running
+  # as root and someone has planted a link called "franken-scan-report-…"
+  # pointing at /etc/shadow, a plain ">" would happily trash it. So: refuse
+  # if the name already exists in ANY form, and create the file with
+  # noclobber (bash then opens it with O_EXCL, which won't follow links).
+  if [ -e "$REPORT_FILE" ] || [ -L "$REPORT_FILE" ]; then
+    printf '\n  %sNot saving the report: "%s" already exists. Pick another name with --report FILE.%s\n' "$C_YELLOW" "$REPORT_FILE" "$C_RESET"
+    return
+  fi
+  ( set -o noclobber; {
     echo "# franken-scan report"
     echo
     echo "| | |"
@@ -625,14 +819,16 @@ write_report() {
     echo "| Date | $(date '+%Y-%m-%d %H:%M %Z') |"
     echo "| Ran as | $(is_root && echo 'root (full scan)' || echo 'normal user (some checks skipped)') |"
     echo "| **Grade** | **$GRADE** (score $SCORE/100) |"
-    echo "| Problems | $COUNT_HIGH high · $COUNT_MED medium · $COUNT_LOW low |"
+    echo "| Problems | $COUNT_HIGH high · $COUNT_MED medium · $COUNT_LOW low · $COUNT_SKIP skipped |"
     printf '%s\n' "${REPORT_LINES[@]}"
     echo
     echo "---"
-    echo "Generated by [franken-scan](https://github.com/MartyMonster/franken-scan) $VERSION. Read-only: nothing on this system was changed."
+    echo "Generated by [franken-scan](https://github.com/MartyMonster/franken-scan) $VERSION. It only reads: no configuration was changed and nothing was sent anywhere."
     echo
     echo "**Want these fixed?** Linux server hardening by MartyMonster: https://martymonster.dev/services#linux"
-  } > "$REPORT_FILE" && printf '\n  Report saved to: %s%s%s\n' "$C_BOLD" "$REPORT_FILE" "$C_RESET"
+  } > "$REPORT_FILE" ) 2>/dev/null \
+    && printf '\n  Report saved to: %s%s%s\n' "$C_BOLD" "$REPORT_FILE" "$C_RESET" \
+    || printf '\n  %sCould not save the report to "%s".%s\n' "$C_YELLOW" "$REPORT_FILE" "$C_RESET"
 }
 
 
@@ -640,15 +836,14 @@ write_report() {
 # Off we go
 # ---------------------------------------------------------------------------
 main() {
+  if [ "$SHOW_MONSTER" -eq 1 ]; then print_monster; exit 0; fi
   detect_system
 
-  printf '%s\n' "${C_BOLD}franken-scan $VERSION${C_RESET}  ${C_DIM}It's alive!… but is it secure?${C_RESET}"
-  printf '%s\n' "${C_DIM}$DISTRO_NAME · $ARCH · kernel $KERNEL · read-only, no network${C_RESET}"
-  is_root || printf '%s\n' "${C_YELLOW}Tip: run with sudo for the full scan (a few checks will be skipped).${C_RESET}"
+  print_banner
 
-  # Order matters a little: check_ssh works out SSH_PORT, and
-  # check_bruteforce uses it later on.
-  SSH_PORT=22
+  # Order matters a little: check_ssh works out SSH_PORTS, and the
+  # firewall and brute-force checks use it later on.
+  SSH_PORTS=22
   check_ssh
   check_firewall
   check_ports
@@ -664,10 +859,7 @@ main() {
   [ "$SCORE" -lt 0 ] && SCORE=0
   GRADE=$(grade_for "$SCORE")
 
-  print_monster "$GRADE"
-  printf '\n  %sGrade: %s%s  (score %d/100)\n' "$C_BOLD" "$GRADE" "$C_RESET" "$SCORE"
-  printf '  %d passed · %s%d high%s · %s%d medium%s · %d low · %d skipped\n' \
-    "$COUNT_PASS" "$C_RED" "$COUNT_HIGH" "$C_RESET" "$C_YELLOW" "$COUNT_MED" "$C_RESET" "$COUNT_LOW" "$COUNT_SKIP"
+  print_summary "$GRADE"
 
   write_report
 
