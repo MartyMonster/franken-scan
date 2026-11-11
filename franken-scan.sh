@@ -181,7 +181,35 @@ skip() {
 
 have()       { command -v "$1" >/dev/null 2>&1; }
 is_root()    { [ "$(id -u)" -eq 0 ]; }
-svc_active() { have systemctl && systemctl is-active --quiet "$1" 2>/dev/null; }
+systemd_running() { [ -d /run/systemd/system ] && have systemctl; }
+svc_active() { systemd_running && systemctl is-active --quiet "$1" 2>/dev/null; }
+
+# Package front ends run inside a new network namespace. If the kernel or
+# permissions prevent isolation, skip the query rather than weaken the promise.
+offline_query() {
+  have unshare && have timeout || return 1
+  unshare --net -- timeout 30 "$@" 2>/dev/null
+}
+
+# Validate explicitly formatted name.arch output; warnings are not packages.
+count_package_names() {
+  awk 'NF {if (NF != 1 || $0 !~ /^[A-Za-z0-9_+.-]+$/) bad=1; else seen[$0]=1}
+       END {if (bad) exit 1; for (p in seen) n++; print n+0}'
+}
+
+# No XML parser dependency for the other checks: without Python, skip this one.
+count_zypper_updates() {
+  have python3 || return 1
+  python3 -c '''import sys, xml.etree.ElementTree as ET
+try:
+    root = ET.fromstring(sys.stdin.read())
+    updates = root.find("update-status")
+    if root.tag != "stream" or updates is None:
+        raise ValueError("unexpected zypper output")
+    print(len({(p.get("name"), p.get("arch")) for p in updates.findall(".//update") if p.get("kind") == "package"}))
+except (ET.ParseError, ValueError):
+    sys.exit(1)'
+}
 
 # Members of a group, read straight from /etc/group. (Deliberately NOT
 # "getent": on machines joined to LDAP/AD that would ask a server over the
@@ -194,11 +222,14 @@ ssh_service() { [ "$FAMILY" = "debian" ] && echo ssh || echo sshd; }
 # Is something listening on this port on a NON-local address?
 # (Loopback, VPN-only and Docker-bridge addresses don't count as "public".)
 listening_publicly() {
-  have ss || return 1
-  ss -H -tln 2>/dev/null | awk '{print $4}' | while read -r a; do
-    case "$a" in 127.*|"[::1]"*|*%lo:*|*%tailscale*|*%wg*|*%docker*|172.17.*) continue ;; esac
-    [ "${a##*:}" = "$1" ] && echo yes && break
-  done | grep -q yes
+  have ss || return 2
+  local listeners a
+  listeners=$(ss -H -tln 2>/dev/null) || return 2
+  while read -r a; do
+    case "$a" in 127.*|"[::1]":*|"::1":*) continue ;; esac
+    [ "${a##*:}" = "$1" ] && return 0
+  done < <(printf '%s\n' "$listeners" | awk '{print $4}')
+  return 1
 }
 
 
@@ -209,13 +240,14 @@ listening_publicly() {
 # Different distros, different package managers. FAMILY decides which update
 # commands we look at and which fix commands we suggest.
 detect_system() {
-  DISTRO_NAME="Unknown Linux"; FAMILY="other"
+  DISTRO_NAME="Unknown Linux"; FAMILY="other"; DISTRO_ID=""
   if [ -r /etc/os-release ]; then
     # Read os-release as plain text rather than "source"-ing it. Sourcing would
     # RUN it as shell code, as root, which is a bad idea for a security tool.
     osr() { sed -n "s/^$1=//p" /etc/os-release | head -n1 | tr -d '"'"'"; }
     DISTRO_NAME=$(osr PRETTY_NAME); [ -n "$DISTRO_NAME" ] || DISTRO_NAME=$(osr NAME)
-    local ids; ids="$(osr ID) $(osr ID_LIKE)"
+    DISTRO_ID=$(osr ID)
+    local ids; ids="$DISTRO_ID $(osr ID_LIKE)"
     case " $ids " in
       *" debian "*|*" ubuntu "*)            FAMILY="debian" ;;
       *" arch "*)                           FAMILY="arch" ;;
@@ -267,8 +299,10 @@ check_ssh() {
   # sshd keeps the first value it sees, so a drop-in file wins over the main
   # file. "sshd -t" checks the config before reloading, so a typo can't
   # take SSH down.
-  local where="add it to a new file /etc/ssh/sshd_config.d/00-hardening.conf"
-  local apply; apply="sudo sshd -t && sudo systemctl reload $(ssh_service)"
+  local where="edit the effective configuration; use /etc/ssh/sshd_config.d/00-hardening.conf only if its Include precedes conflicting settings"
+  local apply="sudo sshd -t, then reload SSH using your service manager"
+  if systemd_running; then apply="sudo sshd -t && sudo systemctl reload $(ssh_service)"; fi
+  info "These are sshd default configuration checks, not verification of every Match block or running daemon override. Keep your session open and test a second login after changes."
 
   # Can a PASSWORD get someone in? Two routes: PasswordAuthentication, and
   # keyboard-interactive via PAM (which usually asks for... a password).
@@ -404,6 +438,10 @@ check_ports() {
     [27017]="MongoDB database"
   )
 
+  local listeners
+  if ! listeners=$(ss -H -tuln 2>/dev/null); then
+    skip "Open ports (ss could not enumerate listeners)"; return
+  fi
   local others=() seen=" "
   while read -r proto _ _ _ local_addr _; do
     [ -z "${local_addr:-}" ] && continue
@@ -411,7 +449,7 @@ check_ports() {
 
     # Only this machine (loopback), only over a VPN (Tailscale/WireGuard), or
     # only reachable by Docker containers. None of those are "on the internet".
-    case "$addr" in 127.*|"[::1]"|*%lo|*%tailscale*|*%wg*|*%docker*|172.17.*) continue ;; esac
+    case "$addr" in 127.*|"[::1]"|"::1") continue ;; esac
 
     # IPv4 and IPv6 usually both show up for the same port. Only report it once.
     case "$seen" in *" $port/$proto "*) continue ;; esac
@@ -420,18 +458,18 @@ check_ports() {
     if [ -n "${RISKY[$port]:-}" ]; then
       problem high "Port $port/$proto is open to the network: ${RISKY[$port]}" \
         "Databases and remote desktops are top targets for automated attacks. Keep them on 127.0.0.1 or behind a firewall/VPN." \
-        "Bind the service to 127.0.0.1 in its config, or block it: sudo ufw deny $port"
+        "Bind the service to loopback in its configuration, or restrict port $port/$proto with your existing firewall. Test the access you need before closing it."
     else
       others+=("$port/$proto")
     fi
-  done <<< "$(ss -H -tuln 2>/dev/null)"
+  done <<< "$listeners"
 
   # The rest go on one line. Listing each separately just buries the stuff
   # that matters (I learned that the first time I ran this on my own PC).
   if [ ${#others[@]} -gt 0 ]; then
-    info "Also listening publicly: ${others[*]}. Make sure you meant each of these to be reachable."
+    info "Also listening on non-loopback addresses: ${others[*]}. Make sure you meant each of these to be reachable."
   elif [ "$seen" = " " ]; then
-    pass "Nothing is listening on public network addresses"
+    pass "No non-loopback listeners found"
   fi
   info "(A firewall may still block some of these. This shows what's LISTENING, not what's reachable from outside.)"
 }
@@ -448,38 +486,43 @@ check_updates() {
   case "$FAMILY" in
     debian)
       if have apt; then
-        pending=$(apt list --upgradable 2>/dev/null | grep -c "upgradable from")
-        # Security updates get called out on their own. They're the ones that matter most.
-        local sec; sec=$(apt list --upgradable 2>/dev/null | grep -c -- "-security")
-        if [ "$sec" -gt 0 ]; then
-          problem medium "$sec security update(s) waiting" \
-            "Security updates fix holes that attackers already know about." \
-            "sudo apt update && sudo apt upgrade"
+        # Preserve the producer status: an empty failed query is not a pass.
+        if out=$(apt list --upgradable 2>/dev/null); then
+          pending=$(printf '%s\n' "$out" | awk '/upgradable from/ {n++} END {print n+0}')
         fi
+        # Repository names containing "security" do not prove update origin.
       fi ;;
     arch)
       # Compares against the local package database. Doesn't sync anything.
-      have pacman && pending=$(pacman -Qu 2>/dev/null | wc -l) ;;
+      if have pacman; then
+        out=$(pacman -Qu 2>/dev/null); rc=$?
+        # pacman returns 1 for an empty query as well as some failures.
+        # Only a successful query is evidence we can safely count here.
+        if [ "$rc" -eq 0 ]; then
+          pending=$(printf '%s\n' "$out" | awk 'NF {n++} END {print n+0}')
+        fi
+      fi ;;
     fedora)
-      # -C = cache only, so dnf won't go off and download metadata.
-      # dnf's exit code: 0 = nothing to update, 100 = updates available,
-      # anything else = it couldn't tell (e.g. no cache yet).
-      if have dnf; then
-        out=$(dnf -C -q check-update 2>/dev/null); rc=$?
-        case "$rc" in
-          0)   pending=0 ;;
-          100) pending=$(printf '%s\n' "$out" | awk 'NF==3 && $1 ~ /\./ {n++} END {print n+0}') ;;
-        esac
+      # Formatted output, plugins disabled, no network namespace fallback.
+      if have dnf5; then
+        if out=$(offline_query dnf5 --cacheonly --disable-plugin='*' -q repoquery --upgrades --queryformat '%{name}.%{arch}\n'); then
+          pending=$(printf '%s\n' "$out" | count_package_names) || pending=""
+        fi
+      elif have dnf; then
+        if out=$(offline_query dnf -C --noplugins -q repoquery --upgrades --qf '%{name}.%{arch}'); then
+          pending=$(printf '%s\n' "$out" | count_package_names) || pending=""
+        fi
       fi ;;
     suse)
-      # --no-refresh = use what's already downloaded. Rows that are updates start with "v |".
-      if have zypper; then
-        out=$(zypper --no-refresh -q list-updates 2>/dev/null) && pending=$(printf '%s\n' "$out" | grep -c '^v ')
+      if have zypper && have python3; then
+        if out=$(offline_query zypper --non-interactive --xmlout --no-refresh list-updates); then
+          pending=$(printf '%s\n' "$out" | count_zypper_updates) || pending=""
+        fi
       fi ;;
   esac
 
   if [ -z "$pending" ]; then
-    skip "Pending updates (couldn't read the package cache. Run your package manager's refresh first, e.g. $(update_cmd))"
+    skip "Pending updates (cache, parser or offline isolation unavailable; refresh manually with $(update_cmd) and retry)"
   elif [ "$pending" -gt 0 ]; then
     problem medium "$pending update(s) waiting to be installed" \
       "Old software is the easy way in. Most attacks use holes that were patched months ago." \
@@ -488,29 +531,23 @@ check_updates() {
     pass "No updates waiting (as of the last time the package list was refreshed)"
   fi
 
-  # Servers get forgotten. Automatic security updates are the safety net.
+  # Presence is useful information, but does not prove automatic installation.
   case "$FAMILY" in
-    debian)
-      # Only count a real setting, not one that's commented out.
-      if grep -qsE '^[[:space:]]*APT::Periodic::Unattended-Upgrade[[:space:]]+"1"' /etc/apt/apt.conf.d/*; then
-        pass "Automatic security updates are on"
+    debian|fedora)
+      if ! systemd_running; then
+        skip "Automatic updates (no running systemd; inspect your scheduler manually)"
       else
-        problem medium "Automatic security updates are off" \
-          "Servers get forgotten. Automatic security updates patch holes even when you don't." \
-          "sudo apt install unattended-upgrades && sudo dpkg-reconfigure -plow unattended-upgrades"
+        local timer found=no
+        for timer in apt-daily-upgrade.timer dnf-automatic.timer dnf-automatic-install.timer dnf5-automatic.timer; do
+          if svc_active "$timer"; then
+            info "Update timer active: $timer. Check its effective settings and last successful installation."
+            found=yes
+          fi
+        done
+        if [ "$found" = no ]; then info "No recognised automatic-update timer active."; fi
+        skip "Automatic update installation policy and last success have not been verified"
       fi ;;
-    fedora)
-      if svc_active dnf-automatic.timer || svc_active dnf-automatic-install.timer || svc_active dnf5-automatic.timer; then
-        pass "Automatic updates are on (dnf-automatic)"
-      else
-        problem medium "Automatic updates are off" \
-          "Servers get forgotten. Automatic updates patch holes even when you don't." \
-          "sudo dnf install dnf-automatic && sudo systemctl enable --now dnf-automatic.timer"
-      fi ;;
-    arch)
-      # Not marking Arch down for this. Unattended updates on a rolling
-      # distro is how you wake up to a broken system.
-      info "Arch is a rolling release: update by hand regularly (automatic updates aren't recommended on Arch)." ;;
+    arch) info "Arch is a rolling release: perform regular, attended full-system upgrades." ;;
   esac
 
   # A patched kernel does nothing until you reboot into it.
@@ -540,7 +577,12 @@ update_cmd() {
     debian) echo "sudo apt update && sudo apt upgrade" ;;
     arch)   echo "sudo pacman -Syu" ;;
     fedora) echo "sudo dnf upgrade" ;;
-    suse)   echo "sudo zypper update" ;;
+    suse)
+      if [ "${DISTRO_ID:-}" = "opensuse-tumbleweed" ]; then
+        echo "sudo zypper dup"
+      else
+        echo "sudo zypper update"
+      fi ;;
     *)      echo "Update with your system's package manager" ;;
   esac
 }
@@ -550,8 +592,17 @@ check_bruteforce() {
   section "Brute-force protection"
 
   # Only really matters if SSH is reachable from outside. If not, no nagging.
-  local public=no port
-  for port in ${SSH_PORTS:-22}; do listening_publicly "$port" && public=yes; done
+  local public=no port rc
+  for port in ${SSH_PORTS:-22}; do
+    if listening_publicly "$port"; then public=yes
+    else
+      rc=$?
+      if [ "$rc" -eq 2 ]; then skip "Brute-force exposure (listener enumeration unavailable)"; return; fi
+    fi
+  done
+  if ! systemd_running; then
+    skip "Brute-force services (no running systemd; inspect your service manager)"; return
+  fi
 
   # fail2ban running doesn't mean it's watching SSH. That needs an "sshd" jail.
   if svc_active fail2ban; then
@@ -565,13 +616,14 @@ check_bruteforce() {
         "Create /etc/fail2ban/jail.local containing: [sshd] enabled = true   then: sudo systemctl restart fail2ban"
     fi
   elif svc_active crowdsec || svc_active sshguard; then
-    pass "Brute-force protection is running ($(svc_active crowdsec && echo crowdsec || echo sshguard))"
+    info "CrowdSec or sshguard service is active; enforcement has not been verified"
+    skip "Brute-force enforcement policy"
   elif [ "$public" = "yes" ]; then
     problem medium "No brute-force blocker running" \
       "Bots hammer SSH with guesses around the clock. fail2ban or CrowdSec bans them after a few failures." \
       "$(install_cmd fail2ban) && sudo systemctl enable --now fail2ban"
   else
-    info "No brute-force blocker running, but SSH isn't open publicly, so that's fine."
+    info "No recognised brute-force blocker active; no non-loopback listener found on configured SSH ports."
   fi
 }
 
@@ -647,7 +699,10 @@ check_files() {
   # is just a link to /usr/bin, and plain find would skip it).
   local ww dirs=() d
   for d in /etc /usr/bin /usr/sbin /usr/lib/systemd; do [ -e "$d" ] && dirs+=("$d"); done
-  ww=$(find -H "${dirs[@]}" -xdev -type f -perm -0002 2>/dev/null | head -n 10 | paste -sd ' ' -)
+  if ! ww=$(find -H "${dirs[@]}" -xdev -type f -perm -0002 -print 2>/dev/null); then
+    skip "System files (some paths could not be inspected)"; return
+  fi
+  ww=$(printf '%s\n' "$ww" | head -n 10 | paste -sd ' ' -)
   if [ -n "$ww" ]; then
     problem medium "System files that ANY user can edit" \
       "Someone with any account could change these to take over the system. Found: $ww" \
@@ -660,17 +715,18 @@ check_files() {
 check_time() {
   section "Clock"
   # Sounds boring, but a drifting clock breaks HTTPS, 2FA codes and log timelines.
-  if have timedatectl; then
-    if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; then
+  local synced
+  if systemd_running && have timedatectl; then
+    if ! synced=$(timedatectl show -p NTPSynchronized --value 2>/dev/null); then
+      skip "Clock sync (timedatectl query failed)"
+    elif [ "$synced" = yes ]; then
       pass "Clock is synced automatically"
-    else
-      problem low "Clock isn't being synced" \
-        "Logs, certificates and 2-factor codes all rely on the correct time." \
-        "sudo timedatectl set-ntp true"
-    fi
-  else
-    skip "Clock sync (timedatectl not available)"
-  fi
+    elif [ "$synced" = no ]; then
+      problem low "Clock is not currently synchronised" \
+        "Logs, certificates and two-factor codes rely on correct time." \
+        "Check your configured time service; with systemd: sudo timedatectl set-ntp true"
+    else skip "Clock sync (unrecognised response)"; fi
+  else skip "Clock sync (running systemd/timedatectl unavailable)"; fi
 }
 
 # Only Let's Encrypt certs for now. That covers most small servers. If
@@ -869,4 +925,4 @@ main() {
   [ "$COUNT_HIGH" -eq 0 ]
 }
 
-main
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main; fi

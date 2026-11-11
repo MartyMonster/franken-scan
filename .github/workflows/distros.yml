@@ -1,0 +1,57 @@
+name: Distro verification
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  distro:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {image: 'debian:12', family: apt, runner: ubuntu-latest}
+          - {image: 'debian:13', family: apt, runner: ubuntu-latest}
+          - {image: 'ubuntu:24.04', family: apt, runner: ubuntu-latest}
+          - {image: 'ubuntu:26.04', family: apt, runner: ubuntu-latest}
+          - {image: 'archlinux:base', family: pacman, runner: ubuntu-latest}
+          - {image: 'fedora:44', family: dnf, runner: ubuntu-latest}
+          - {image: 'rockylinux:9', family: dnf, runner: ubuntu-latest}
+          - {image: 'almalinux:9', family: dnf, runner: ubuntu-latest}
+          - {image: 'opensuse/leap:16.0', family: zypper, runner: ubuntu-latest}
+          - {image: 'opensuse/tumbleweed:latest', family: zypper, runner: ubuntu-latest}
+          - {image: 'debian:13', family: apt, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare disposable distro
+        env:
+          IMAGE: ${{ matrix.image }}
+          FAMILY: ${{ matrix.family }}
+        run: |
+          docker pull "$IMAGE"
+          docker image inspect "$IMAGE" --format '{{json .RepoDigests}}' | tee image-digest.txt
+          case "$FAMILY" in
+            apt) prep='apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y bash coreutils procps iproute2 util-linux passwd python3 openssh-server' ;;
+            pacman) prep='pacman -Syu --noconfirm bash coreutils procps-ng iproute2 util-linux shadow python openssh' ;;
+            dnf) prep='dnf install -y bash coreutils procps-ng iproute util-linux shadow-utils python3 openssh-server' ;;
+            zypper) prep='zypper --non-interactive refresh && zypper --non-interactive install bash coreutils procps iproute2 util-linux shadow python3 openssh' ;;
+          esac
+          printf 'FROM %s\nRUN %s\n' "$IMAGE" "$prep" > /tmp/Dockerfile.scan
+          docker build -f /tmp/Dockerfile.scan -t scan-test /tmp
+      - name: Scan without external network
+        run: |
+          docker run --name scan --network none --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
+            -v "$PWD:/src:ro" scan-test bash /src/tests/container.sh | tee scan.txt
+      - name: Inspect filesystem effects
+        if: always()
+        run: docker diff scan | tee filesystem-diff.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-${{ strategy.job-index }}
+          path: |
+            image-digest.txt
+            scan.txt
+            filesystem-diff.txt
