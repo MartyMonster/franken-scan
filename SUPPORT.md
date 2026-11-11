@@ -27,8 +27,8 @@ packages; the actual container scans have no external network.
 
 Booted Debian 13, Fedora 44 and Leap 16 cloud-image validation is a separate
 [VM workflow](https://github.com/MartyMonster/franken-scan/actions/workflows/virtual-machines.yml).
-All three booted guests passed at commit dd6bf06 (run 43002608077). Release commits
-are checked again before publication; container success alone does not establish
+All three booted guests passed for v1.1.0 at commit f667098 (run 43003245385).
+The eleven container jobs passed at the same commit (run 43003245363); container success alone does not establish
 booted-service coverage. Guest images run in unprivileged QEMU with restricted user networking and
 no host directory mounts. Image hashes and serial logs are retained per run.
 
