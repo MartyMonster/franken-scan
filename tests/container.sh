@@ -17,7 +17,7 @@ for user in root nobody; do
   [[ $rc = 0 || $rc = 1 ]]
   grep -q '── Result ──' "/tmp/scan-$user.txt"
   grep -q 'Grade [ABCDF]' "/tmp/scan-$user.txt"
-  ! grep -Eq 'command not found|unbound variable|syntax error|Traceback' "/tmp/scan-$user.txt"
+  if grep -Eq 'command not found|unbound variable|syntax error|Traceback' "/tmp/scan-$user.txt"; then exit 1; fi
 done
 # A second report request must preserve the existing report.
 sha256sum /tmp/report.md > /tmp/report.checksum

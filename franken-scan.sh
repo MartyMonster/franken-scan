@@ -220,7 +220,7 @@ group_members() { awk -F: -v g="$1" '$1 == g {print $4}' /etc/group 2>/dev/null;
 ssh_service() { [ "$FAMILY" = "debian" ] && echo ssh || echo sshd; }
 
 # Is something listening on this port on a NON-local address?
-# (Loopback, VPN-only and Docker-bridge addresses don't count as "public".)
+# This establishes a non-loopback listener, not internet reachability.
 listening_publicly() {
   have ss || return 2
   local listeners a
@@ -241,10 +241,11 @@ listening_publicly() {
 # commands we look at and which fix commands we suggest.
 detect_system() {
   DISTRO_NAME="Unknown Linux"; FAMILY="other"; DISTRO_ID=""
-  if [ -r /etc/os-release ]; then
+  local os_release=${1:-/etc/os-release}
+  if [ -r "$os_release" ]; then
     # Read os-release as plain text rather than "source"-ing it. Sourcing would
     # RUN it as shell code, as root, which is a bad idea for a security tool.
-    osr() { sed -n "s/^$1=//p" /etc/os-release | head -n1 | tr -d '"'"'"; }
+    osr() { sed -n "s/^$1=//p" "$os_release" | head -n1 | tr -d '"'"'"; }
     DISTRO_NAME=$(osr PRETTY_NAME); [ -n "$DISTRO_NAME" ] || DISTRO_NAME=$(osr NAME)
     DISTRO_ID=$(osr ID)
     local ids; ids="$DISTRO_ID $(osr ID_LIKE)"
@@ -252,7 +253,7 @@ detect_system() {
       *" debian "*|*" ubuntu "*)            FAMILY="debian" ;;
       *" arch "*)                           FAMILY="arch" ;;
       *" fedora "*|*" rhel "*|*" centos "*) FAMILY="fedora" ;;   # also Rocky, Alma etc.
-      *" suse "*|*" opensuse "*)            FAMILY="suse" ;;
+      *" suse "*|*" opensuse "*|*" opensuse-leap "*|*" opensuse-tumbleweed "*)            FAMILY="suse" ;;
     esac
   fi
   ARCH=$(uname -m)       # x86_64, aarch64 (Pi / RockPi boards), etc.
@@ -358,66 +359,42 @@ check_ssh() {
 
 check_firewall() {
   section "Firewall"
-
-  # A firewall SERVICE running isn't the same as a firewall actually
-  # blocking anything. (A ufw with "allow incoming", or an nftables
-  # "accept everything", looks active but protects nothing.) So I only give
-  # a pass when the rules show incoming traffic is actually dropped by
-  # default, and that needs root to see.
-  if ! is_root; then
-    local svc
-    for svc in ufw firewalld nftables; do
-      if svc_active "$svc"; then
-        skip "Firewall rules ($svc is running, but sudo is needed to check it actually blocks anything)"
+  if ! is_root; then skip "Firewall (need sudo to inspect rules)"; return; fi
+  local rules zone zones
+  if have ufw; then
+    if rules=$(ufw status verbose 2>/dev/null); then
+      if [[ "$rules" == *"Status: active"* ]]; then
+        if printf '%s\n' "$rules" | grep -qE 'Default: (deny|reject) \(incoming\)'; then
+          pass "ufw reports an active deny/reject incoming default policy"
+        else
+          problem high "ufw does not report a restrictive incoming default" \
+            "An active firewall can still allow incoming connections by default." \
+            "Keep this session open. Allow every required SSH port first, then review: sudo ufw default deny incoming. Test a second connection."
+        fi
         return
       fi
-    done
-    skip "Firewall (need sudo to read the rules; no firewall service seen running)"
+    fi
+  fi
+  if have firewall-cmd && svc_active firewalld; then
+    if zones=$(firewall-cmd --get-active-zones 2>/dev/null); then
+      info "firewalld is running. Active zone assignments: $zones"
+      if zone=$(firewall-cmd --get-default-zone 2>/dev/null); then info "Default zone: $zone"; fi
+    fi
+    skip "firewalld effective filtering across interfaces, sources and IP families needs review"
+    info "Review sudo firewall-cmd --list-all-zones. Before changing zones or enabling a firewall, allow all required SSH ports and test a second connection."
     return
   fi
-
-  local verdict="" detail=""
-
-  if have ufw && ufw status 2>/dev/null | grep -q "Status: active"; then
-    if ufw status verbose 2>/dev/null | grep -qE "Default: (deny|reject) \(incoming\)"; then
-      verdict=pass; detail="ufw is on and blocks incoming connections by default"
-    else
-      verdict=weak; detail="ufw is on, but it ALLOWS incoming connections by default"
+  if have nft; then
+    if rules=$(nft list ruleset 2>/dev/null); then
+      if [[ "$rules" == *"hook input"* ]]; then
+        info "nftables input hooks exist; individual policies alone do not establish complete filtering"
+      else info "No nftables input hook found"; fi
     fi
-  elif svc_active firewalld && have firewall-cmd; then
-    local zone; zone=$(firewall-cmd --get-default-zone 2>/dev/null)
-    if [ "$zone" = "trusted" ]; then
-      verdict=weak; detail="firewalld is on, but the default zone is 'trusted' (lets everything in)"
-    elif [ -n "$zone" ]; then
-      verdict=pass; detail="firewalld is on (default zone: $zone)"
-    fi
-  elif have nft && nft list ruleset 2>/dev/null | grep -qE "hook input .*policy (drop|reject)"; then
-    verdict=pass; detail="nftables drops incoming traffic by default"
-  elif have iptables && iptables -S INPUT 2>/dev/null | grep -qE "^-P INPUT (DROP|REJECT)|^-A INPUT -j (DROP|REJECT)$"; then
-    verdict=pass; detail="iptables drops incoming traffic by default (IPv4)"
-  elif have nft && nft list ruleset 2>/dev/null | grep -q "hook input"; then
-    verdict=unknown; detail="nftables has input rules, but the default is 'accept', so I can't tell what's actually blocked"
   fi
-
-  # The fix: Fedora/RHEL get firewalld, everyone else gets ufw (the easiest
-  # to learn). The SSH port(s) are allowed FIRST, which is the bit that
-  # stops people locking themselves out of a remote server.
-  local fw_fix allow="" port
-  for port in ${SSH_PORTS:-22}; do allow="$allow sudo ufw allow $port/tcp &&"; done
+  skip "Effective host firewall protection could not be established"
   case "$FAMILY" in
-    fedora) fw_fix="sudo dnf install firewalld && sudo systemctl enable --now firewalld   (SSH on port 22 is allowed by default; for another port first run: sudo firewall-cmd --permanent --add-port=PORT/tcp)" ;;
-    *)      fw_fix="$(install_cmd ufw) &&$allow sudo ufw default deny incoming && sudo ufw enable" ;;
-  esac
-
-  case "$verdict" in
-    pass)    pass "$detail" ;;
-    weak)    problem high "$detail" \
-               "A firewall that lets everything in is the same as no firewall at all." \
-               "$fw_fix" ;;
-    unknown) skip "Firewall: $detail" ;;
-    *)       problem high "No active firewall found" \
-               "Without a firewall, every service you run is reachable from the internet, including the ones you forgot about." \
-               "$fw_fix" ;;
+    fedora|suse) info "Review firewalld/nftables using your distro documentation. Configure required SSH ports and the correct interface zone before enabling filtering." ;;
+    *) info "Review your installed firewall. With ufw, allow required SSH ports before enabling it. Keep this session open and test a second connection." ;;
   esac
 }
 
@@ -447,8 +424,7 @@ check_ports() {
     [ -z "${local_addr:-}" ] && continue
     local addr="${local_addr%:*}" port="${local_addr##*:}"
 
-    # Only this machine (loopback), only over a VPN (Tailscale/WireGuard), or
-    # only reachable by Docker containers. None of those are "on the internet".
+    # Only loopback is excluded. Subnet/interface names do not prove isolation.
     case "$addr" in 127.*|"[::1]"|"::1") continue ;; esac
 
     # IPv4 and IPv6 usually both show up for the same port. Only report it once.
@@ -474,6 +450,19 @@ check_ports() {
   info "(A firewall may still block some of these. This shows what's LISTENING, not what's reachable from outside.)"
 }
 
+# An empty metadata directory is not evidence that a host is up to date.
+package_cache_available() {
+  local files
+  case "$FAMILY" in
+    debian) files=$(find /var/lib/apt/lists -maxdepth 1 -type f -name '*Packages*' -print 2>/dev/null) || return 1 ;;
+    arch) files=$(find /var/lib/pacman/sync -maxdepth 1 -type f -name '*.db' -print 2>/dev/null) || return 1 ;;
+    fedora) files=$(find /var/cache/dnf /var/cache/libdnf5 -type f -name repomd.xml -print 2>/dev/null) ;;
+    suse) files=$(find /var/cache/zypp -type f -name repomd.xml -print 2>/dev/null) || return 1 ;;
+    *) return 1 ;;
+  esac
+  [ -n "$files" ]
+}
+
 # Everything here works off what's already on the machine: no "apt update",
 # no network. So "no updates" really means "none as of your last refresh".
 check_updates() {
@@ -483,6 +472,7 @@ check_updates() {
   # looks exactly like "all good", and that's how scanners lie to you.)
   local pending="" out rc
 
+  if package_cache_available; then
   case "$FAMILY" in
     debian)
       if have apt; then
@@ -520,6 +510,8 @@ check_updates() {
         fi
       fi ;;
   esac
+
+  fi
 
   if [ -z "$pending" ]; then
     skip "Pending updates (cache, parser or offline isolation unavailable; refresh manually with $(update_cmd) and retry)"
@@ -635,7 +627,7 @@ check_accounts() {
   local admins
   admins=$(for g in sudo wheel admin; do group_members "$g"; done \
            | tr ',' '\n' | grep -v '^$' | sort -u | paste -sd ' ' -)
-  info "Users with admin (sudo) rights: ${admins:-none found}. Remove anyone who shouldn't be there."
+  info "Members listed in local admin groups (not an effective sudo-policy audit): ${admins:-none found}. Remove anyone who shouldn't be there."
 
   # UID 0 IS root, whatever the account is called. A second one is a classic
   # backdoor, so this one's worth checking even though it's rare.
@@ -655,7 +647,7 @@ check_accounts() {
     empty=$(awk -F: '$2 == "" {print $1}' /etc/shadow | paste -sd ' ' -)
     if [ -n "$empty" ]; then
       problem high "Account(s) with an empty password: $empty" \
-        "Anyone can log in as these users without a password." \
+        "An empty local password field may allow passwordless authentication, depending on PAM and service policy." \
         "Lock them: sudo passwd -l USERNAME"
     else
       pass "No accounts have an empty password"
@@ -834,7 +826,7 @@ BANNER
 print_summary() {
   local g=$1 mood col
   case "$g" in
-    A) mood="It's alive… and SECURE!";                         col="$C_GREEN" ;;
+    A) mood="Strong results for the checks performed.";                         col="$C_GREEN" ;;
     B) mood="Not bad. A few stitches to tighten.";             col="$C_GREEN" ;;
     C) mood="Hmm. This monster needs some work.";              col="$C_YELLOW" ;;
     D) mood="Yikes. Plenty to fix.";                           col="$C_RED" ;;

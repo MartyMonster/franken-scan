@@ -35,7 +35,7 @@ jobs:
           case "$FAMILY" in
             apt) prep='apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y bash coreutils procps iproute2 util-linux passwd python3 openssh-server' ;;
             pacman) prep='pacman -Syu --noconfirm bash coreutils procps-ng iproute2 util-linux shadow python openssh' ;;
-            dnf) prep='dnf install -y bash coreutils procps-ng iproute util-linux shadow-utils python3 openssh-server' ;;
+            dnf) prep='dnf install -y bash procps-ng iproute util-linux shadow-utils python3 openssh-server' ;;
             zypper) prep='zypper --non-interactive refresh && zypper --non-interactive install bash coreutils procps iproute2 util-linux shadow python3 openssh' ;;
           esac
           printf 'FROM %s\nRUN %s\n' "$IMAGE" "$prep" > /tmp/Dockerfile.scan
