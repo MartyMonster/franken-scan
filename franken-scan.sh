@@ -885,7 +885,7 @@ write_report() {
 # ---------------------------------------------------------------------------
 main() {
   if [ "$SHOW_MONSTER" -eq 1 ]; then print_monster; exit 0; fi
-  detect_system
+  detect_system /etc/os-release
 
   print_banner
 

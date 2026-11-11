@@ -54,4 +54,4 @@ if listening_publicly 22; then exit 1; else [[ $? = 1 ]]; fi
 # A failed namespace setup must never fall back to executing the query.
 unshare() { return 1; }
 if offline_query bash -c 'exit 0'; then exit 1; fi
-printf 'Portability regression tests passed\n' 
+printf 'Portability regression tests passed\n'
