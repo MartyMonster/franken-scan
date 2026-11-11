@@ -15,7 +15,7 @@ for name in ['franken-scan.sh', 'tests/vm-guest.sh']:
                   'encoding': 'b64', 'permissions': '0755',
                   'content': base64.b64encode((root / name).read_bytes()).decode()})
 config = {'write_files': files,
-          'runcmd': [['bash', '-c', 'bash /opt/franken-scan/tests/vm-guest.sh > /dev/ttyS0 2>&1; poweroff']],
+          'runcmd': [['bash', '-c', 'bash /opt/franken-scan/tests/vm-guest.sh > /tmp/guest-test.log 2>&1; result=$?; cat /tmp/guest-test.log /tmp/vm-scan.txt > /dev/ttyS0 2>&1; echo GUEST_TEST_STATUS=$result > /dev/ttyS0; sleep 3; poweroff']],
           'ssh_pwauth': False, 'disable_root': True,
           'package_update': False, 'package_upgrade': False}
 (work / 'user-data').write_text('#cloud-config\n' + json.dumps(config))

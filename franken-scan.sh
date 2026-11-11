@@ -200,7 +200,7 @@ count_package_names() {
 # No XML parser dependency for the other checks: without Python, skip this one.
 count_zypper_updates() {
   have python3 || return 1
-  python3 -c '''import sys, xml.etree.ElementTree as ET
+  python3 -c 'import sys, xml.etree.ElementTree as ET
 try:
     root = ET.fromstring(sys.stdin.read())
     updates = root.find("update-status")

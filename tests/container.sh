@@ -4,6 +4,7 @@ set -eu
 cd /src
 bash -n franken-scan.sh
 bash tests/portability.sh
+bash tests/detection.sh
 find /etc -xdev -type f -exec sha256sum {} + | sort > /tmp/config-before.txt
 for user in root nobody; do
   set +e
