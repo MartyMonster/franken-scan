@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-set -eu
+set -eux
 cd /opt/franken-scan
 # Cloud images have systemd and SSH installed. No packages are installed here.
-bash -c 'source ./franken-scan.sh; systemd_running; detect_system /etc/os-release; svc_active "$(ssh_service)"'
+bash -xc 'source ./franken-scan.sh; systemd_running; detect_system /etc/os-release; svc_active "$(ssh_service)"'
 set +e
 timeout 90 bash franken-scan.sh --no-color --report /tmp/vm-report.md > /tmp/vm-scan.txt 2>&1
 rc=$?

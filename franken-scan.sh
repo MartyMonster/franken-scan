@@ -10,7 +10,7 @@
 #  Ground rules I'm sticking to (read the code and hold me to them):
 #    - it only LOOKS. It never changes your configuration: no installs,
 #      no edits, no service restarts. (Honest small print: tools it asks,
-#      like dnf or zypper, may write to their own log files, and reading
+#      like dnf or zypper, may write logs or package-cache bookkeeping, and reading
 #      files can bump their "last accessed" time. That's the OS, not us.)
 #    - it never contacts the internet or phones home. No telemetry, nothing.
 #    - it's one bash file with nothing to install.
@@ -485,21 +485,22 @@ check_updates() {
     arch)
       # Compares against the local package database. Doesn't sync anything.
       if have pacman; then
-        out=$(pacman -Qu 2>/dev/null); rc=$?
-        # pacman returns 1 for an empty query as well as some failures.
-        # Only a successful query is evidence we can safely count here.
+        out=$(pacman -Qqu 2>&1); rc=$?
+        # With a present sync cache, pacman reports no matching upgrades as
+        # status 1 with no output. Other errors have diagnostics: retain them.
         if [ "$rc" -eq 0 ]; then
-          pending=$(printf '%s\n' "$out" | awk 'NF {n++} END {print n+0}')
+          pending=$(printf '%s\n' "$out" | count_package_names) || pending=""
+        elif [ "$rc" -eq 1 ] && [ -z "$out" ]; then pending=0
         fi
       fi ;;
     fedora)
       # Formatted output, plugins disabled, no network namespace fallback.
       if have dnf5; then
-        if out=$(offline_query dnf5 --cacheonly --disable-plugin='*' -q repoquery --upgrades --queryformat '%{name}.%{arch}\n'); then
+        if out=$(offline_query dnf5 --cacheonly --disable-plugin='*' --setopt=skip_if_unavailable=False -q repoquery --upgrades --queryformat '%{name}.%{arch}\n'); then
           pending=$(printf '%s\n' "$out" | count_package_names) || pending=""
         fi
       elif have dnf; then
-        if out=$(offline_query dnf -C --noplugins -q repoquery --upgrades --qf '%{name}.%{arch}'); then
+        if out=$(offline_query dnf -C --noplugins --setopt=skip_if_unavailable=False -q repoquery --upgrades --qf '%{name}.%{arch}'); then
           pending=$(printf '%s\n' "$out" | count_package_names) || pending=""
         fi
       fi ;;
@@ -545,7 +546,7 @@ check_updates() {
   # A patched kernel does nothing until you reboot into it.
   # Debian/Ubuntu leave a flag file. On Arch the old kernel's modules folder
   # disappears after an upgrade, which is a handy tell.
-  if [ -e /var/run/reboot-required ] || { [ "$FAMILY" = "arch" ] && [ ! -d "/usr/lib/modules/$KERNEL" ]; }; then
+  if [ -e /var/run/reboot-required ] || { [ "$FAMILY" = "arch" ] && systemd_running && [ ! -d "/usr/lib/modules/$KERNEL" ]; }; then
     problem low "A reboot is needed to finish updates" \
       "Security fixes in the kernel only take effect after a reboot." \
       "sudo reboot   (when it suits you)"
@@ -885,6 +886,10 @@ write_report() {
 # ---------------------------------------------------------------------------
 main() {
   if [ "$SHOW_MONSTER" -eq 1 ]; then print_monster; exit 0; fi
+  local required
+  for required in awk sed grep find head sort paste tr wc date stat uname cut fold id; do
+    if ! have "$required"; then printf 'Required tool missing: %s. Install the standard distro utilities and retry.\n' "$required" >&2; return 2; fi
+  done
   detect_system /etc/os-release
 
   print_banner

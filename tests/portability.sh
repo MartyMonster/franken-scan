@@ -23,9 +23,15 @@ FAMILY=arch
 KERNEL=$(uname -r)
 output=$(check_updates)
 [[ "$output" == *'SKIP Pending updates'* ]]
-pacman() { printf 'first 1 -> 2\nsecond 3 -> 4\n'; }
+pacman() { printf 'first\nsecond\n'; }
 output=$(check_updates)
 [[ "$output" == *'2 update(s) waiting'* ]]
+pacman() { return 1; }
+output=$(check_updates)
+[[ "$output" == *'PASS No updates waiting'* ]]
+pacman() { printf 'error: failed to initialise database\n' >&2; return 1; }
+output=$(check_updates)
+[[ "$output" == *'SKIP Pending updates'* ]]
 FAMILY=suse
 DISTRO_ID=opensuse-tumbleweed
 [[ $(update_cmd) == 'sudo zypper dup' ]]

@@ -56,12 +56,13 @@ your box a grade from A to F.
 
 - **It only looks.** It never changes your configuration: no installs, no edits, no restarts.
   *(Small print, because honesty matters: package tools it asks, like dnf or zypper, may write
-  to their own logs, and reading files can update their "last accessed" time.)*
+  logs and package-cache bookkeeping, and reading files can update their "last accessed" time.)*
 - **It never contacts the internet.** Nothing is sent anywhere, no telemetry, no phoning home.
   (It reads local files directly rather than asking LDAP/AD servers about users and groups.)
-- **The only file it creates** is the report, and only with `--report`. It refuses to overwrite
+- **The script only requests a new report file** with `--report` (package-tool side effects are described above). It refuses to overwrite
   anything that already exists, including symlinks.
-- **One file, nothing to install.** Just bash and the standard tools already on your system.
+- **One downloadable file.** Bash and standard Linux tools; missing capabilities are skipped.
+  RPM-family update queries need `unshare` and `timeout`; zypper XML also needs Python 3.
 - **Read it yourself.** It's one commented script. Please do read it before running it with sudo,
   because that's a good habit with *any* script from the internet.
 
@@ -103,10 +104,10 @@ Exit code is `0` when there are no HIGH problems and `1` when there's at least o
 | Area | Checks |
 |---|---|
 | **SSH** | effective settings via `sshd -T`: password logins (including the sneaky keyboard-interactive/PAM route), root login, ports |
-| **Firewall** | actually *blocking* incoming traffic, not just running (ufw default policy, firewalld zone, nftables/iptables policy) |
+| **Firewall** | ufw incoming default policy; other managers reported conservatively when effective filtering cannot be established |
 | **Open ports** | anything listening publicly, with databases, Docker API, RDP, VNC, SMB, FTP and Telnet flagged as HIGH |
-| **Updates** | pending updates (from the local cache, no network), automatic security updates, reboot needed |
-| **Brute-force** | fail2ban (with an SSH jail), CrowdSec or sshguard, when SSH is public |
+| **Updates** | pending updates from local metadata, update-timer observations, reboot indicators |
+| **Brute-force** | fail2ban (with an SSH jail), CrowdSec or sshguard, when configured SSH ports have non-loopback listeners |
 | **Accounts** | who has sudo, hidden UID-0 accounts, empty passwords |
 | **Docker** | socket permissions, docker-group members |
 | **System files** | world-writable files in system folders |
@@ -119,11 +120,21 @@ A ≥ 90 · B ≥ 75 · C ≥ 60 · D ≥ 40 · F below that.
 If anything was skipped (usually because it wasn't run with sudo), the result says the scan was
 **incomplete**: a check that couldn't run is never counted as a pass.
 
-## Works on
+## Compatibility
 
-Debian, Ubuntu, Arch (and Omarchy, Manjaro…), Fedora, RHEL, Rocky, Alma and openSUSE, on x86_64
-and ARM (Raspberry Pi, RockPi and friends). It's tested on Debian 12, Ubuntu 24.04, Fedora 41,
-Rocky 9 and Arch.
+Targets Debian/Ubuntu, Arch, Fedora/RHEL-family and openSUSE. See [SUPPORT.md](SUPPORT.md)
+for exact tested releases, architectures and the distinction between container and
+booted-system coverage. RHEL, Omarchy and Manjaro compatibility is inferred unless
+explicitly listed as directly tested. Alpine, Void, immutable variants and non-systemd
+service management are not verified targets in this release.
+
+Package metadata is never refreshed by the scan and may be stale. RPM queries require
+permission to create an isolated network namespace (normally root); otherwise they
+are skipped. Containers frequently lack running services and consequently report an
+incomplete scan. A high grade is not proof of security.
+
+See [SECURITY.md](SECURITY.md) for the execution boundary and incidental file effects,
+[CONTRIBUTING.md](CONTRIBUTING.md) for tests, and [CHANGELOG.md](CHANGELOG.md) for updates.
 
 ## Found problems you'd rather not fix yourself?
 
