@@ -4,12 +4,13 @@ set -eu
 cd /src
 bash -n franken-scan.sh
 bash tests/portability.sh
+find /etc -xdev -type f -exec sha256sum {} + | sort > /tmp/config-before.txt
 for user in root nobody; do
   set +e
   if [ "$user" = root ]; then
     timeout 90 bash franken-scan.sh --no-color --report /tmp/report.md > /tmp/scan-root.txt 2>&1
   else
-    su -s /bin/bash nobody -c 'timeout 90 bash /src/franken-scan.sh --no-color' > /tmp/scan-nobody.txt 2>&1
+    setpriv --reuid=65534 --regid=65534 --clear-groups timeout 90 bash /src/franken-scan.sh --no-color > /tmp/scan-nobody.txt 2>&1
   fi
   rc=$?
   set -e
@@ -27,4 +28,6 @@ printf 'keep me\n' >/tmp/target
 ln -s /tmp/target /tmp/link
 bash franken-scan.sh --no-color --report /tmp/link >/tmp/symlink.txt || [[ $? = 1 ]]
 [[ $(cat /tmp/target) = 'keep me' ]]
+find /etc -xdev -type f -exec sha256sum {} + | sort > /tmp/config-after.txt
+diff -u /tmp/config-before.txt /tmp/config-after.txt
 printf 'Container scan and report-safety tests passed\n'

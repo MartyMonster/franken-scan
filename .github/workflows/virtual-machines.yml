@@ -1,0 +1,44 @@
+name: Booted virtual machines
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  vm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debian13
+            url: https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
+          - name: fedora44
+            url: https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
+          - name: leap16
+            url: https://download.opensuse.org/distribution/leap/16.0/appliances/Leap-16.0-Minimal-VM.x86_64-Cloud.qcow2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare virtualisation tools
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils ovmf
+      - name: Download official guest image
+        env:
+          IMAGE_URL: ${{ matrix.url }}
+        run: |
+          mkdir -p /tmp/franken-vm
+          curl --fail --location --retry 3 "$IMAGE_URL" -o /tmp/franken-vm/base.qcow2
+          sha256sum /tmp/franken-vm/base.qcow2 | tee image-sha256.txt
+      - name: Boot isolated VM and verify scan
+        run: python3 tests/vm-runner.py /tmp/franken-vm | tee vm.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vm-${{ matrix.name }}
+          path: |
+            image-sha256.txt
+            vm.txt
+            /tmp/franken-vm/serial.log
