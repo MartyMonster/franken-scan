@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — v1.1.0
+## v1.1.0 — 2026-11-11
 
 - Add repeatable distro-container and booted-VM verification, including ARM64.
 - Preserve failed command results; missing caches and unsupported checks stay incomplete.
@@ -10,7 +10,7 @@
 - Stop claiming automatic updates or firewall protection from service presence alone.
 - Treat non-loopback listeners honestly; do not assume Docker/VPN subnet names are safe.
 - Preserve failed listener, clock and system-file probes as unknown results.
-- Add report overwrite/symlink regression checks and clearer scope documentation.
+- Create reports with owner-only permissions; add overwrite/symlink regression checks and clearer scope documentation.
 
 ## v1.0.1
 

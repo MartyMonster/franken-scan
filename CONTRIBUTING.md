@@ -9,6 +9,7 @@ why it matters, and a distro-appropriate next step. Never execute suggested fixe
 bash -n franken-scan.sh
 shellcheck franken-scan.sh tests/container.sh tests/vm-guest.sh
 bash tests/portability.sh
+bash tests/detection.sh
 git diff --check
 ```
 

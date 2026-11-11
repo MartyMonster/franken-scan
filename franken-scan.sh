@@ -34,7 +34,7 @@ set -u
 # works the same no matter what language your system is set to.
 export LC_ALL=C
 
-VERSION="1.0.1"
+VERSION="1.1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -858,7 +858,7 @@ write_report() {
     printf '\n  %sNot saving the report: "%s" already exists. Pick another name with --report FILE.%s\n' "$C_YELLOW" "$REPORT_FILE" "$C_RESET"
     return
   fi
-  ( set -o noclobber; {
+  ( umask 077; set -o noclobber; {
     echo "# franken-scan report"
     echo
     echo "| | |"

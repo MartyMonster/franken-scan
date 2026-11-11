@@ -21,6 +21,7 @@ for user in root nobody; do
   grep -q 'Grade [ABCDF]' "/tmp/scan-$user.txt"
   if grep -Eq 'command not found|unbound variable|syntax error|Traceback' "/tmp/scan-$user.txt"; then exit 1; fi
 done
+[[ $(stat -c %a /tmp/report.md) = 600 ]]
 # A second report request must preserve the existing report.
 sha256sum /tmp/report.md > /tmp/report.checksum
 bash franken-scan.sh --no-color --report /tmp/report.md >/tmp/repeat.txt || [[ $? = 1 ]]

@@ -97,7 +97,9 @@ sudo bash franken-scan.sh     # the full scan
 | `--version` / `--help` | What you'd expect |
 | `--monster` | Says hello. That's it. |
 
-Exit code is `0` when there are no HIGH problems and `1` when there's at least one, so you can use it in scripts and cron.
+Exit code is `0` when there are no HIGH problems, `1` when there is at least one,
+and `2` for invalid options or missing mandatory utilities. Exit 0 can still mean an
+incomplete scan: always read the skipped count. Reports are created with owner-only permissions.
 
 ## What it checks
 

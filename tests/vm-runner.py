@@ -2,6 +2,7 @@
 import base64
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -43,5 +44,5 @@ with subprocess.Popen(cmd) as proc:
             proc.wait()
 log = (work / 'serial.log').read_text(errors='replace')
 print(log)
-if 'FRANKEN_VM_PASS' not in log:
+if not re.search(r'^FRANKEN_VM_PASS\r?$', log, re.M) or not re.search(r'^GUEST_TEST_STATUS=0\r?$', log, re.M):
     sys.exit('VM integration test did not reach its success marker')
